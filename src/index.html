@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BC Wardrobe Manager</title>
+  <link rel="stylesheet" href="styles.css">
+
+  <!-- 1. Stubs: must come before any BC script -->
+  <script src="bc-stubs.js"></script>
+  <!-- 1b. No-op stubs for BC asset-script hook fns referenced by ECHO's bundle -->
+  <script src="bc-hook-stubs.js"></script>
+
+  <!-- 2. BC library: LZString (for parsing BCX strings) + m4 (WebGL matrix math) -->
+  <script src="bc://Scripts/lib/LZString.js"></script>
+  <script src="bc://Scripts/lib/webgl/resources/m4.js"></script>
+
+  <!-- 3. BC core utilities -->
+  <script src="bc://Scripts/Common.js"></script>
+
+  <!-- 3b. BC's real WebGL renderer (provides GLDrawImage + correct color shaders) -->
+  <script src="bc://Scripts/GLDraw.js"></script>
+
+  <!-- 4. Pose definitions (provides PoseFemale3DCG) -->
+  <script src="bc://Scripts/Pose.js"></script>
+
+  <!-- 5. Asset management (provides AssetLoad, AssetLoadAll, etc.) -->
+  <script src="bc://Scripts/Asset.js"></script>
+
+  <!-- 6. Asset definitions -->
+  <!-- Female3DCGExtended.js has too many optional UI hooks; stub it out -->
+  <script src="bc://Assets/Female3DCG/Female3DCG.js"></script>
+
+  <!-- 7. Drawing logic (provides CommonDrawComputeDrawingCoordinates etc.) -->
+  <script src="bc://Scripts/CommonDraw.js"></script>
+
+  <!-- 7b. Guarded no-op stubs for BC runtime fns ECHO references (skips loaded ones) -->
+  <script src="bc-runtime-stubs.js"></script>
+
+  <!-- 7c. Ensure common hook targets exist, then load a PATCHED real bcModSdk that
+       auto-stubs any still-missing hook target (instead of throwing) so ECHO's
+       AssetManager.invokeOriginal actually registers groups/assets into BC -->
+  <script src="bc-hooked-stubs.js"></script>
+  <script src="bc-vivify-stubs.js"></script>
+  <script src="bcmodsdk-patched.js"></script>
+
+  <!-- 8. Wardrobe renderer (our code, uses BC globals above) -->
+  <script src="bc-render.js"></script>
+</head>
+<body>
+
+<!-- Custom modal prompt (Electron disables window.prompt) -->
+<div id="modal-overlay" class="hidden">
+  <div class="modal-box">
+    <div id="modal-title">Title</div>
+    <input type="text" id="modal-input">
+    <div class="modal-buttons">
+      <button id="modal-cancel" class="secondary" data-i18n="cancel">Cancel</button>
+      <button id="modal-ok" data-i18n="ok">OK</button>
+    </div>
+  </div>
+</div>
+
+<!-- Right-click context menu -->
+<div id="ctx-menu" class="hidden"></div>
+
+<!-- Folder picker (tree) for "Move to folder" -->
+<div id="picker-overlay" class="hidden">
+  <div class="modal-box">
+    <div id="picker-title" data-i18n="moveTitle">Move to folder</div>
+    <div id="picker-list"></div>
+    <div class="modal-buttons">
+      <button id="picker-cancel" class="secondary" data-i18n="cancel">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Settings panel -->
+<div id="settings-overlay" class="hidden">
+  <div class="modal-box settings-box">
+    <div id="settings-title" data-i18n="settings">Settings</div>
+
+    <label class="set-row"><span data-i18n="setLanguage">Language</span>
+      <select id="set-language"></select></label>
+
+    <!-- Server: presets + version + custom -->
+    <label class="set-row"><span data-i18n="setServer">Asset server</span>
+      <select id="set-server"></select></label>
+    <label class="set-row sub"><span data-i18n="setVersion">Version</span>
+      <input type="text" id="set-version" placeholder="R129" style="max-width:120px"></label>
+    <input type="text" id="set-server-custom" data-i18n-ph="setServerCustom" placeholder="Custom full base URL…">
+
+    <!-- Four themeable colors -->
+    <div class="set-section">
+      <div class="set-subtitle" data-i18n="setColors">UI colors</div>
+      <label class="set-row"><span data-i18n="colAccent">Accent / buttons</span><input type="color" id="col-accent" value="#e94560"></label>
+      <label class="set-row"><span data-i18n="colPreview">Preview background</span><input type="color" id="col-preview" value="#12122b"></label>
+      <label class="set-row"><span data-i18n="colPanel">Panels (side/right)</span><input type="color" id="col-panel" value="#16213e"></label>
+      <label class="set-row"><span data-i18n="colText">Text</span><input type="color" id="col-text" value="#e0e0e0"></label>
+      <button id="col-reset" class="secondary" data-i18n="colReset">↺ Reset colors</button>
+    </div>
+
+    <!-- Plugin manager -->
+    <div class="set-section">
+      <div class="set-subtitle plug-head">
+        <span data-i18n="setPlugins">Clothing plugins</span>
+        <span class="header-btns">
+          <button id="plug-add" class="icon-btn" data-i18n-title="plugAdd" title="Add plugin">＋</button>
+          <button id="plug-folder" class="icon-btn" data-i18n-title="plugFolder" title="Open plugin folder">📁</button>
+        </span>
+      </div>
+      <div id="plug-list"></div>
+      <div class="hint" data-i18n="setPluginsHint">ECHO is built in. Restart after changing.</div>
+    </div>
+
+    <div class="modal-buttons">
+      <button id="settings-cancel" class="secondary" data-i18n="cancel">Cancel</button>
+      <button id="settings-save" data-i18n="save">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Full-screen loading overlay (shown during init) -->
+<div id="loading-overlay">
+  <div class="loading-box">
+    <div class="spinner"></div>
+    <div id="loading-text" data-i18n="loading">Loading…</div>
+  </div>
+</div>
+
+<div id="main">
+
+  <!-- Left: outfit tree -->
+  <div id="sidebar">
+    <div id="sidebar-header">
+      <span data-i18n="savedOutfits">Saved Outfits</span>
+      <button id="btn-new-folder" class="icon-btn" data-i18n-title="newFolder" title="New folder">📁＋</button>
+    </div>
+    <div id="outfit-list"></div>
+    <button id="btn-delete" class="danger" data-i18n="deleteSel">🗑 Delete Selected Outfit</button>
+  </div>
+
+  <!-- Center: character preview -->
+  <div id="preview-panel">
+    <div id="canvas-wrap">
+      <canvas id="preview-canvas" width="500" height="1000"></canvas>
+    </div>
+    <div id="zoom-bar">
+      <button id="zoom-out" class="icon-btn">🔍－</button>
+      <input type="range" id="zoom-range" min="20" max="200" value="100" step="5">
+      <button id="zoom-in" class="icon-btn">🔍＋</button>
+      <button id="zoom-fit" class="icon-btn" data-i18n="fit">Fit</button>
+      <span id="zoom-label">100%</span>
+    </div>
+    <div id="progress-wrap">
+      <div id="progress-label" data-i18n="loadingDots">Loading…</div>
+      <div id="progress-track"><div id="progress"></div></div>
+    </div>
+  </div>
+
+  <!-- Right: import / save -->
+  <div id="right-panel">
+
+    <div class="section">
+      <div class="section-title" data-i18n="importTitle">Import BCX String</div>
+      <textarea id="import-box" rows="5" data-i18n-ph="importPlaceholder" placeholder="Paste BCX appearance export string here…"></textarea>
+      <button id="btn-import" data-i18n="preview">▶ Preview</button>
+      <button id="btn-copy" class="secondary" data-i18n="copy">📋 Copy String</button>
+      <label class="check-row"><input type="checkbox" id="chk-echo-body" checked> <span data-i18n="echoBody">Use Echo V2 body instead of original</span></label>
+    </div>
+
+    <div class="section">
+      <div class="section-title" data-i18n="saveTitle">Save to Wardrobe</div>
+      <input type="text" id="save-name" data-i18n-ph="outfitName" placeholder="Outfit name…">
+      <input type="text" id="save-folder" list="folder-list" data-i18n-ph="folderName" placeholder="Folder (optional)…">
+      <datalist id="folder-list"></datalist>
+      <button id="btn-save" data-i18n="saveNew">💾 Save as New Outfit</button>
+    </div>
+
+    <div id="status" data-i18n="initializing">Initializing…</div>
+  </div>
+</div>
+
+<!-- App logic (loads after BC scripts are available) -->
+<script src="app.js"></script>
+
+</body>
+</html>

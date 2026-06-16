@@ -1,0 +1,56 @@
+{
+  "name": "bc-wardrobe",
+  "version": "1.0.0",
+  "description": "BC Character Wardrobe Manager",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win --x64",
+    "pack": "electron-builder --dir"
+  },
+  "devDependencies": {
+    "electron": "^36.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "dependencies": {
+    "electron-store": "^8.2.0"
+  },
+  "build": {
+    "appId": "com.bcwardrobe.app",
+    "productName": "BC Wardrobe",
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "src/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../Bondage-College-master/BondageClub/Scripts",
+        "to": "bc/Scripts",
+        "filter": [
+          "Common.js",
+          "CommonDraw.js",
+          "GLDraw.js",
+          "Pose.js",
+          "Asset.js",
+          "lib/LZString.js",
+          "lib/webgl/**"
+        ]
+      },
+      {
+        "from": "../Bondage-College-master/BondageClub/Assets/Female3DCG",
+        "to": "bc/Assets/Female3DCG",
+        "filter": [
+          "Female3DCG.js",
+          "Female3DCGExtended.js"
+        ]
+      }
+    ]
+  }
+}
