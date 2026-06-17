@@ -65,23 +65,61 @@ async function loadEchoOverrides() {
 
 /**
  * Resolve a relative asset path to a full URL.
- *   1. ECHO override manifest (ECHO custom assets + V2-redrawn vanilla clothing)
- *   2. ECHO's live image mapping (custom redirects like ArmMask)
- *   3. BC CDN (vanilla originals)
+ *   1. Let ECHO's live image mapping NORMALIZE the path first. This applies ECHO's
+ *      per-asset redirects, including SIZE remaps (e.g. an open jacket only ships
+ *      Normal/Small art and maps Large/XLarge → Normal) and the shared ArmMask.
+ *      mapImgSrc may return a full URL (use it) or a normalized relative path.
+ *   2. Look up the (normalized) relative path in OUR override manifest → versioned
+ *      jsdelivr URL. This is the key step: ECHO's own basic-mapping is often empty in
+ *      our harness, so its normalized path stays relative — we turn it into a URL.
+ *   3. Fall back to the BC CDN (vanilla originals).
  */
 function resolveUrl(rel) {
-  if (_echoOverrideMap && _echoOverrideMap.has(rel)) return _echoOverrideMap.get(rel);
+  let path = rel;
   const ns = window.__BC_LUZI_GLOBALS__;
   if (ns) {
     for (const k of Object.keys(ns)) {
       if (k.startsWith("ImageMapping") && ns[k] && typeof ns[k].mapImgSrc === "function") {
         const mapped = ns[k].mapImgSrc(rel);
-        if (typeof mapped === "string" && mapped !== rel && /^https?:/i.test(mapped)) return mapped;
+        if (typeof mapped === "string" && mapped) {
+          if (/^https?:/i.test(mapped)) return mapped;     // already a full URL
+          path = mapped;                                    // normalized relative path (e.g. size-remapped)
+        }
         break;
       }
     }
   }
-  return BC_CDN_BASE + rel;
+  if (_echoOverrideMap) {
+    if (_echoOverrideMap.has(path)) return _echoOverrideMap.get(path);
+    if (path !== rel && _echoOverrideMap.has(rel)) return _echoOverrideMap.get(rel);
+    // Size fallback: some ECHO garments (open jackets, shoes…) only ship part of the
+    // sizes and map the rest (e.g. Large/XLarge → Normal). ECHO does this via mapImgSrc,
+    // but that's unreliable in our harness, so we resolve it ourselves against the
+    // manifest: if the body-size variant is missing, try the nearest available size.
+    const sized = sizeFallbackUrl(path) || (path !== rel && sizeFallbackUrl(rel));
+    if (sized) return sized;
+  }
+  return BC_CDN_BASE + path;
+}
+
+const _SIZE_FALLBACK = {
+  XLarge: ["Large", "Normal", "Small"],
+  Large: ["Normal", "XLarge", "Small"],
+  Normal: ["Small", "Large", "XLarge"],
+  Small: ["Normal", "FlatSmall", "FlatMedium"],
+  FlatMedium: ["Small", "FlatSmall", "Normal"],
+  FlatSmall: ["Small", "FlatMedium", "Normal"],
+};
+/** If `path` (with a body-size token) isn't in the manifest, return the URL of the
+ *  nearest size that IS — else null. */
+function sizeFallbackUrl(path) {
+  const m = path.match(/_(XLarge|Large|Normal|Small|FlatMedium|FlatSmall)_/);
+  if (!m) return null;
+  for (const alt of _SIZE_FALLBACK[m[1]] || []) {
+    const altPath = path.replace(m[0], "_" + alt + "_");
+    if (_echoOverrideMap.has(altPath)) return _echoOverrideMap.get(altPath);
+  }
+  return null;
 }
 
 /** Load and cache an image. Falls back to ECHO CDN (same rel path) on a BC CDN 404. */
@@ -452,41 +490,53 @@ function buildLayerUrl(item, layer, appearance, activePoses) {
  */
 function resolveLayerColor(item, layer, appearance) {
   if (!layer.AllowColorize) return null;
-
-  // InheritColor: some groups take their color from another group's item
-  const inheritColor = layer.InheritColor ?? item.Asset.InheritColor;
-  let colorSource = item;
-  if (inheritColor) {
-    const inherited = appearance.find((i) => i.Asset?.Group?.Name === inheritColor);
-    if (inherited) colorSource = inherited;
-  }
+  const idx = layer.ColorIndex ?? 0;
 
   // CopyLayerColor: this layer uses the color of another named layer on the same asset
   if (layer.CopyLayerColor) {
     const srcLayer = item.Asset.Layer?.find((l) => l.Name === layer.CopyLayerColor);
     if (srcLayer) {
-      const srcIdx = srcLayer.ColorIndex ?? 0;
-      const srcColors = Array.isArray(colorSource.Color) ? colorSource.Color : [colorSource.Color ?? "Default"];
-      const raw = srcColors[srcIdx] ?? srcColors[0] ?? "Default";
-      return raw === "Default" || raw == null ? null : raw;
+      const sIdx = srcLayer.ColorIndex ?? 0;
+      const sArr = Array.isArray(item.Color) ? item.Color : [item.Color ?? "Default"];
+      const sRaw = sArr[sIdx] ?? sArr[0] ?? "Default";
+      return (sRaw === "Default" || sRaw == null) ? null : sRaw;
     }
   }
 
-  const propColor = colorSource.Property?.Color;
-  const baseColor = colorSource.Color;
-  const effectiveColors = Array.isArray(propColor) ? propColor : (Array.isArray(baseColor) ? baseColor : [baseColor]);
+  // Faithful port of BC's CommonDrawResolveLayerColor:
+  // 1) the appearance item's own Color, indexed by the layer's ColorIndex, wins first.
+  let c = Array.isArray(item.Color) ? item.Color[idx] : (item.Color ?? "Default");
 
-  const idx = layer.ColorIndex ?? 0;
-  let raw = effectiveColors[idx] ?? effectiveColors[0] ?? "Default";
-
-  // BC resolves "Default" to the asset's DefaultColor (often a skin-tone hex for the body)
-  if (raw === "Default" || raw == null) {
-    const def = colorSource.Asset?.DefaultColor;
-    const defColor = Array.isArray(def) ? (def[idx] ?? def[0]) : def;
-    raw = defColor ?? "Default";
+  // 2) "Default" → the item's Property.DefaultColor (extended-item per-type defaults), then
+  //    the asset's own DefaultColor (skin-tone hex for body groups, etc.).
+  if (c === "Default" || c == null) {
+    const pDef = item.Property?.DefaultColor;
+    if (pDef != null) c = Array.isArray(pDef) ? (pDef[idx] ?? "Default") : pDef;
+  }
+  if (c === "Default" || c == null) {
+    const aDef = item.Asset?.DefaultColor;
+    if (aDef != null) c = Array.isArray(aDef) ? (aDef[idx] ?? aDef[0] ?? "Default") : aDef;
   }
 
-  return raw === "Default" || raw == null ? null : raw;
+  // 3) Still "Default" → walk the InheritColor chain, taking the PARENT item's first color.
+  //    (BC only inherits when the item's own color is Default — so a dyed ECHO hair keeps
+  //    its own color instead of being overridden by the hidden vanilla HairFront's color.)
+  let colorGroup = (c === "Default" || c == null) ? (layer.InheritColor ?? item.Asset.InheritColor) : null;
+  let guard = 0;
+  while (colorGroup != null && guard++ < 8) {
+    const parent = appearance.find((i) => i.Asset?.Group?.Name === colorGroup);
+    if (!parent) break;
+    const pArr = Array.isArray(parent.Color) ? parent.Color : [parent.Color ?? "Default"];
+    const pColor = pArr[0] ?? "Default";
+    if ((pColor === "Default" || pColor == null) && parent.Asset?.InheritColor) {
+      colorGroup = parent.Asset.InheritColor; // keep chasing the chain
+    } else {
+      c = pColor;
+      colorGroup = null;
+    }
+  }
+
+  return (c === "Default" || c == null) ? null : c;
 }
 
 /**
@@ -513,8 +563,12 @@ function resolveLayerOpacity(item, layer, lo) {
   const maxO = typeof layer.MaxOpacity === "number" ? layer.MaxOpacity : 1;
   const minO = typeof layer.MinOpacity === "number" ? layer.MinOpacity : 0;
   opacity = Math.min(maxO, Math.max(minO, opacity));
-  // AEE per-layer override wins if specified
-  if (lo && lo.Opacity != null) opacity = lo.Opacity;
+  // AEE per-layer override: COMBINE (multiply) with the base/Property opacity rather than
+  // replace it. Some items carry both a per-layer Property.Opacity (e.g. hidden strap-garment
+  // panels set to 0) AND an AEE LayerOverride whose Opacity defaults to 1 — replacing would
+  // let that default-1 clobber the real 0 and wrongly show the layer. Multiplying keeps both
+  // intents: 0×1 stays hidden, 1×0.5 dims, etc.
+  if (lo && typeof lo.Opacity === "number") opacity *= lo.Opacity;
   return opacity;
 }
 
@@ -572,6 +626,111 @@ function drawLayerGL(img, drawX, drawY, color, opacity, fullAlpha, flipX, masks,
     opts.FullAlpha = fullAlpha !== false; // default true
   }
   GLDrawImage(img.src, gl, drawX, drawY, opts, 0);
+}
+
+/**
+ * Compute a layer's draw position: pose-aware DrawingLeft/Top, AEE LayerOverrides,
+ * then the active BodyStyle's DrawOffset nudge. (Mirrors BC's CommonDraw coordinate logic.)
+ */
+function computeLayerPos(item, layer, layerIdx, activePoses, bodyStyleAsset) {
+  const lo = item.Property?.LayerOverrides?.[layerIdx];
+  const poseDL = layer.DrawingLeft, poseDT = layer.DrawingTop;
+  let baseX = poseDL?.[""] ?? 0, baseY = poseDT?.[""] ?? 0;
+  if (poseDL && activePoses) for (const p of activePoses) { if (poseDL[p] != null) { baseX = poseDL[p]; break; } }
+  if (poseDT && activePoses) for (const p of activePoses) { if (poseDT[p] != null) { baseY = poseDT[p]; break; } }
+  let drawX = lo?.DrawingLeft?.[""] ?? baseX;
+  let drawY = lo?.DrawingTop?.[""] ?? baseY;
+  if (bodyStyleAsset?.DrawOffset) {
+    const gName = item.Asset.DynamicGroupName ?? item.Asset.Group?.Name;
+    const off = bodyStyleAsset.DrawOffset.find((o) =>
+      o.Group === gName &&
+      (o.Asset === undefined || o.Asset === item.Asset.Name) &&
+      (o.Layer === undefined || o.Layer.includes(layer.Name ?? "")));
+    if (off) { drawX += off.X ?? 0; drawY += off.Y ?? 0; }
+  }
+  return { drawX, drawY };
+}
+
+let _gradKeyCounter = 0;
+/**
+ * Replicate ECHO's "渐变叠加 / 双渐变叠加" (gradient hair overlay) items.
+ *
+ * These assets ship NO image (DrawImages:false, HasImage:false). In-game ECHO produces
+ * them with an `AfterDraw` ScriptHook that programmatically paints a vertical gradient and
+ * clips it to the hair's shape (see echo-clothing-ext .../化妆美发/渐变叠加.js). Our static
+ * renderer doesn't run ECHO draw hooks, so we reproduce the exact same maths here, building
+ * each overlay as a pre-baked canvas that we splice into the GL draw order as a plain layer.
+ *
+ * @returns {Array} synthetic draw entries ({ synthetic, img(canvas), key, drawX, drawY, priority, ... })
+ */
+function buildGradientOverlays(appearance, drawList, activePoses) {
+  const out = [];
+  const items = appearance.filter((i) => i.Asset?.Group?.Name === "额外头发_Luzi");
+  if (!items.length) return out;
+  const frontGroups = new Set(["HairFront", "新前发_Luzi"]);
+  const backGroups = new Set(["HairBack", "新后发_Luzi"]);
+  const pick = (arr) => Array.isArray(arr)
+    ? arr.find((x) => typeof x === "string" && x.startsWith("#"))
+    : (typeof arr === "string" && arr.startsWith("#") ? arr : null);
+
+  for (const item of items) {
+    const P = item.Property || {};
+    const tr = P.TypeRecord || {};
+    const upper = P.upperBound ?? 125;       // baseline from 渐变叠加.js
+    const size = P.gradientSize ?? 300;
+    const rotation = (((P.rotation ?? 180) - 180) * Math.PI) / 180;
+    // Color: InheritColor "HairFront" means use the item's OWN color first, and only
+    // inherit HairFront's when the item's own is Default. ECHO falls back to "#FF8888".
+    const inh = appearance.find((i) => i.Asset?.Group?.Name === "HairFront");
+    let c = pick(item.Color) || pick(inh?.Color) || "#FF8888";
+    if (!/^#[0-9a-fA-F]{6}$/.test(c)) c = "#FF8888";
+    const isDouble = item.Asset.Name === "双渐变叠加";
+
+    for (const L of ["Back", "Front"]) {
+      // ScriptHook gate: only the option index 0 ("有"/Yes) draws.
+      if (L === "Front" && tr.f !== 0) continue;
+      if (L === "Back" && tr.b !== 0) continue;
+      const groups = L === "Front" ? frontGroups : backGroups;
+
+      // Hair-shape mask = the already-resolved hair layers composited (PartsMask equivalent).
+      const parts = drawList.filter((e) => e.img && groups.has(e.item?.Asset?.Group?.Name));
+      if (!parts.length) continue;
+      const mask = document.createElement("canvas");
+      mask.width = CANVAS_W; mask.height = CANVAS_H;
+      const mctx = mask.getContext("2d");
+      for (const e of parts) mctx.drawImage(e.img, e.drawX, e.drawY);
+
+      // Gradient (transparent → solid), exactly as 渐变叠加.js afterDraw.
+      const cv = document.createElement("canvas");
+      cv.width = CANVAS_W; cv.height = CANVAS_H;
+      const g2d = cv.getContext("2d");
+      g2d.save();
+      g2d.translate(250, upper);
+      g2d.rotate(rotation);
+      let grad = g2d.createLinearGradient(0, 0, 0, size);
+      grad.addColorStop(0, `${c}00`); grad.addColorStop(1, `${c}FF`);
+      g2d.fillStyle = grad; g2d.fillRect(-1200, 0, 2400, size);
+      g2d.fillStyle = `${c}FF`; g2d.fillRect(-1200, size - 1, 2400, 1200);
+      if (isDouble) {
+        grad = g2d.createLinearGradient(0, 0, 0, -size);
+        grad.addColorStop(0, `${c}00`); grad.addColorStop(1, `${c}FF`);
+        g2d.fillStyle = grad; g2d.fillRect(-1200, -size, 2400, size);
+        g2d.fillStyle = `${c}FF`; g2d.fillRect(-1200, -size - 1199, 2400, 1200);
+      }
+      g2d.restore();
+      g2d.globalCompositeOperation = "destination-in";
+      g2d.drawImage(mask, 0, 0);
+      g2d.globalCompositeOperation = "source-over";
+
+      const lyr = (item.Asset.Layer || []).find((l) => l.Name === L);
+      const priority = lyr?.Priority ?? (L === "Front" ? 53 : 6);
+      const key = `synthetic://grad-${++_gradKeyCounter}`;
+      cv.src = key; // expando so drawLayerGL's `img.src` lookup hits our primed cache entry
+      out.push({ synthetic: true, img: cv, key, drawX: 0, drawY: 0, priority,
+        item, layer: { Name: L }, asset: item.Asset.Name, group: "额外头发_Luzi" });
+    }
+  }
+  return out;
 }
 
 /**
@@ -715,8 +874,25 @@ async function renderCharacter(canvas, bundle, onProgress, options = {}) {
 
   const _drawDiag = [];
   const useGL = glAvailable();
+
+  // Unified draw list: each entry carries its image and precomputed draw position.
+  const drawList = layerPairs.map((lp, i) => {
+    const { drawX, drawY } = computeLayerPos(lp.item, lp.layer, lp.layerIdx, activePoses, bodyStyleAsset);
+    return { ...lp, img: images[i], drawX, drawY };
+  });
+
+  // Splice in ECHO gradient-overlay items (额外头发_Luzi). These have no image and are
+  // normally drawn by an AfterDraw ScriptHook we don't run — buildGradientOverlays bakes
+  // them into canvases. Insert each just after the last existing layer of equal priority.
+  const grads = buildGradientOverlays(appearance, drawList, activePoses);
+  for (const g of grads) {
+    let idx = drawList.length;
+    for (let k = 0; k < drawList.length; k++) { if (drawList[k].priority > g.priority) { idx = k; break; } }
+    drawList.splice(idx, 0, g);
+  }
+
   if (useGL) {
-    // Prime BC's GLDrawImageCache with our already-loaded images (draw + mask).
+    // Prime BC's GLDrawImageCache with our already-loaded images (draw + mask + overlays).
     for (let i = 0; i < images.length; i++) {
       const img = images[i];
       if (img && img.complete && img.naturalWidth > 0) GLDrawImageCache.set(img.src, img);
@@ -724,42 +900,33 @@ async function renderCharacter(canvas, bundle, onProgress, options = {}) {
     for (const [u, img] of maskImgByUrl) {
       if (img.complete && img.naturalWidth > 0) GLDrawImageCache.set(u, img);
     }
+    for (const g of grads) GLDrawImageCache.set(g.key, g.img);
     // Clear the shared GL canvas, then draw every layer in priority order.
     GLDrawClearRect(GLDrawCanvas.GL, 0, 0, 1000, CANVAS_H, 0);
   }
 
-  for (let i = 0; i < layerPairs.length; i++) {
-    const { item, layer, layerIdx, priority } = layerPairs[i];
-    const img = images[i];
+  for (let i = 0; i < drawList.length; i++) {
+    const e = drawList[i];
+    const img = e.img;
     if (!img) continue;
 
-    // Layer draw position: pose-aware DrawingLeft/Top, then AEE override
-    const lo = item.Property?.LayerOverrides?.[layerIdx];
-    const poseDL = layer.DrawingLeft;
-    const poseDT = layer.DrawingTop;
-    let baseX = poseDL?.[""] ?? 0;
-    let baseY = poseDT?.[""] ?? 0;
-    if (poseDL && activePoses) {
-      for (const p of activePoses) { if (poseDL[p] != null) { baseX = poseDL[p]; break; } }
+    // Synthetic gradient overlay: color already baked in, draw plain (no colorize/masks).
+    if (e.synthetic) {
+      if (useGL) drawLayerGL(img, e.drawX, e.drawY, null, 1, true, false, null, null);
+      else ctx.drawImage(img, e.drawX, e.drawY);
+      _drawDiag.push(`${e.group}/${e.asset} [${e.layer.Name}] (gradient overlay)`);
+      continue;
     }
-    if (poseDT && activePoses) {
-      for (const p of activePoses) { if (poseDT[p] != null) { baseY = poseDT[p]; break; } }
-    }
-    let drawX = lo?.DrawingLeft?.[""] ?? baseX;
-    let drawY = lo?.DrawingTop?.[""] ?? baseY;
 
-    // BodyStyle DrawOffset: EchoV2 nudges certain groups (Pussy, vulva items, …)
-    // so they line up with the redrawn base model. Mirrors BC's CommonDraw logic.
-    if (bodyStyleAsset?.DrawOffset) {
-      const gName = item.Asset.DynamicGroupName ?? item.Asset.Group?.Name;
-      const off = bodyStyleAsset.DrawOffset.find((o) =>
-        o.Group === gName &&
-        (o.Asset === undefined || o.Asset === item.Asset.Name) &&
-        (o.Layer === undefined || o.Layer.includes(layer.Name ?? "")));
-      if (off) { drawX += off.X ?? 0; drawY += off.Y ?? 0; }
-    }
+    const { item, layer, layerIdx, priority } = e;
+    const drawX = e.drawX, drawY = e.drawY;
+    const lo = item.Property?.LayerOverrides?.[layerIdx];
 
     const opacity = resolveLayerOpacity(item, layer, lo);
+    // Fully-transparent layers (per-layer Property.Opacity of 0, e.g. hidden panels of a
+    // strappy garment) must not draw at all. BC's plain GL program is supposed to honor
+    // u_alpha, but in our harness an alpha of 0 still shows through — so skip outright.
+    if (opacity <= 0) continue;
     const color = resolveLayerColor(item, layer, appearance);
     const td = getAeeTransform(item, layerIdx);
 

@@ -71,6 +71,13 @@ const MENU_FALLBACK = {
   help: "Help", about: "About", github: "Open GitHub",
   aboutTitle: "About BC Wardrobe Manager",
   aboutBody: "BC Wardrobe Manager  ver " + APP_VERSION + "\nby Likolisu",
+  checkUpdate: "Check for updates…",
+  updateTitle: "Update",
+  updateAvail: "A new version is available: {latest}  (current {cur}).",
+  updateDetail: "Open the GitHub releases page to download it?",
+  updateGo: "Go to download", updateLater: "Later",
+  updateNone: "You are on the latest version.",
+  updateFail: "Could not check for updates.",
 };
 function menuStrings(lang) {
   const read = (code) => {
@@ -79,6 +86,45 @@ function menuStrings(lang) {
   };
   const m = read(lang) || read("en") || {};
   return { ...MENU_FALLBACK, ...m };
+}
+
+// Numeric version compare ("v1.2" vs "1.10"). Returns >0 if a is newer than b.
+function compareVersions(a, b) {
+  const pa = String(a).replace(/^v/i, "").split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = String(b).replace(/^v/i, "").split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return d;
+  }
+  return 0;
+}
+
+// Update NOTIFIER (not auto-installer): compare the latest GitHub release tag against
+// APP_VERSION and, if newer, offer to open the releases page. `silent` (startup check)
+// stays quiet unless an update exists; a manual check also reports up-to-date / failure.
+async function checkForUpdates(win, { silent } = {}) {
+  const M = menuStrings(currentLang());
+  try {
+    const res = await net.fetch("https://api.github.com/repos/awdrrawd/BC-Wardrobe-Manager/releases/latest", {
+      headers: { "User-Agent": "BC-Wardrobe-Manager", "Accept": "application/vnd.github+json" },
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const latest = (await res.json()).tag_name;
+    if (!latest) throw new Error("no tag");
+    if (compareVersions(latest, APP_VERSION) > 0) {
+      const r = await dialog.showMessageBox(win, {
+        type: "info", title: M.updateTitle,
+        message: M.updateAvail.replace("{latest}", latest).replace("{cur}", APP_VERSION),
+        detail: M.updateDetail,
+        buttons: [M.updateGo, M.updateLater], defaultId: 0, cancelId: 1,
+      });
+      if (r.response === 0) shell.openExternal(REPO_URL + "/releases/latest");
+    } else if (!silent) {
+      dialog.showMessageBox(win, { type: "info", title: M.updateTitle, message: M.updateNone, buttons: ["OK"] });
+    }
+  } catch (e) {
+    if (!silent) dialog.showMessageBox(win, { type: "warning", title: M.updateTitle, message: M.updateFail, detail: String(e && e.message || e), buttons: ["OK"] });
+  }
 }
 
 function setLanguage(win, lang) {
@@ -159,6 +205,7 @@ function buildMenu(win) {
     ]},
     { label: M.help, submenu: [
       { label: M.github, click: () => shell.openExternal(REPO_URL) },
+      { label: M.checkUpdate, click: () => checkForUpdates(win, { silent: false }) },
       { type: "separator" },
       { label: M.about, click: () => dialog.showMessageBox(win, { type: "info", title: M.aboutTitle, message: "BC Wardrobe Manager", detail: M.aboutBody + "\n\n" + REPO_URL, buttons: ["OK"] }) },
     ]},
@@ -219,6 +266,13 @@ app.whenReady().then(() => {
 
   seedLangDir();   // copy default translations into the editable lang/ folder once
   createWindow();
+
+  // Notify (don't auto-install) if a newer GitHub release exists. Delay so the window
+  // is up first; stays silent when already up-to-date or offline.
+  setTimeout(() => {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (win) checkForUpdates(win, { silent: true });
+  }, 3000);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

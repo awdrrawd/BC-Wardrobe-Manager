@@ -372,14 +372,26 @@ async function loadEchoExtension() {
     }
     for (const p of s.pluginUrls) { if (p.enabled !== false && p.url) await injectScript(p.url); }
     // bc-cloth.js uses dynamic import() internally — wait for the async chain to settle.
-    // Poll until AssetGroup count stabilizes (ECHO adds groups asynchronously).
+    // Poll until BOTH the group count AND the total asset count (across all groups,
+    // since ECHO frequently uses AssetGroupAdd() to push new items into an EXISTING
+    // group rather than creating a new one) stabilize. Tracking AssetGroup.length alone
+    // misses late-arriving assets added to pre-existing groups — they'd never make it
+    // into AssetMap, so those items silently fail to render.
+    const countAssets = () => {
+      if (typeof AssetGroup === "undefined") return 0;
+      let n = 0;
+      for (const g of AssetGroup) n += Array.isArray(g.Asset) ? g.Asset.length : 0;
+      return n;
+    };
     let prevGroups = typeof AssetGroup !== "undefined" ? AssetGroup.length : 0;
+    let prevAssets = countAssets();
     let stable = 0;
     while (stable < 6) {
       await new Promise((r) => setTimeout(r, 500));
-      const cur = typeof AssetGroup !== "undefined" ? AssetGroup.length : 0;
-      if (cur === prevGroups) stable++;
-      else { stable = 0; prevGroups = cur; }
+      const curGroups = typeof AssetGroup !== "undefined" ? AssetGroup.length : 0;
+      const curAssets = countAssets();
+      if (curGroups === prevGroups && curAssets === prevAssets) stable++;
+      else { stable = 0; prevGroups = curGroups; prevAssets = curAssets; }
     }
     rebuildAssetMap();
     const newGroups = (typeof AssetGroup !== "undefined" ? AssetGroup.length : 0) - baseGroups;

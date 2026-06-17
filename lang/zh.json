@@ -86,14 +86,6 @@
     "aboutTitle": "關於 BC Wardrobe Manager",
     "aboutBody": "BC Wardrobe Manager  ver 1.0\n作者：Likolisu\n\n使用 Bondage Club 與 ECHO 的素材線上繪製角色外觀，並儲存／分類外觀。\n需要連線網路，素材來自外部 CDN，連線不一定穩定。",
     "restoreOk": "已還原衣櫃，正在重新整理。",
-    "backupOk": "已備份衣櫃。",
-    "checkUpdate": "檢查更新…",
-    "updateTitle": "更新",
-    "updateAvail": "有新版本可用：{latest}（目前 {cur}）。",
-    "updateDetail": "要前往 GitHub 發布頁下載嗎？",
-    "updateGo": "前往下載",
-    "updateLater": "稍後",
-    "updateNone": "已是最新版本。",
-    "updateFail": "無法檢查更新。"
+    "backupOk": "已備份衣櫃。"
   }
 }
