@@ -7,7 +7,7 @@
 > 一個**免安裝**的獨立桌面工具，能繪製 **Bondage Club（BC）** 角色外觀（含 **ECHO**
 > 擴充服裝），並讓你儲存、分類、管理多套外觀。
 
-**Author / 作者:** Likolisu  ·  **Version / 版本:** 1.0
+**Author / 作者:** Likolisu  ·  **Version / 版本:** 1.1
 **Repository:** https://github.com/awdrrawd/BC-Wardrobe-Manager
 
 ---
